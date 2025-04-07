@@ -1,3 +1,5 @@
 tokens.db
+responses.db
+responses.db*
 config.py
 *pycache*

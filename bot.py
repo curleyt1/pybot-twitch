@@ -19,8 +19,9 @@ OWNER_ID = config.OWNER_ID # Your personal User ID..
 
 
 class Bot(commands.Bot):
-    def __init__(self, *, token_database: asqlite.Pool) -> None:
+    def __init__(self, *, token_database: asqlite.Pool, responses_database: asqlite.Pool) -> None:
         self.token_database = token_database
+        self.responses_database = responses_database
         super().__init__(
             client_id=CLIENT_ID,
             client_secret=CLIENT_SECRET,
@@ -78,6 +79,49 @@ class Bot(commands.Bot):
         async with self.token_database.acquire() as connection:
             await connection.execute(query)
 
+    async def add_response(self, command: str, response: str) -> None:
+        # # Make sure to call super() as it will add the tokens interally and return us some data...
+        # resp: twitchio.authentication.ValidateTokenPayload = await super().add_token(token, refresh)
+
+        # For custom dynamic commands, store the response in sqlite database so that it persists when bot is restarted.
+        query = """
+        INSERT INTO responses (command, response)
+        VALUES (?, ?)
+        ON CONFLICT(command)
+        DO UPDATE SET
+            command = excluded.command;
+            response = excluded.response;
+        """
+
+        async with self.responses_database.acquire() as connection:
+            await connection.execute(query, (command, response))
+
+        LOGGER.info("Added new command", command, response)
+        return resp
+
+    # async def remove_response(self, command: str) -> None:
+    #     # Delete command from dynamic responses table
+    #     query = """
+    #     DELETE FROM responses
+    #     WHERE command=(command)
+    #     VALUES (?);
+    #     """
+
+    async def load_responses(self, path: str | None = None) -> None:
+        # We don't need to call this manually, it is called in .login() from .start() internally...
+
+        async with self.responses_database.acquire() as connection:
+            rows: list[sqlite3.Row] = await connection.fetchall("""SELECT * from responses""")
+
+        for row in rows:
+            await self.add_response(row["command"], row["response"])
+
+    async def setup_responses_database(self) -> None:
+        # Create our dynamic response table, if it doesn't exist..
+        query = """CREATE TABLE IF NOT EXISTS responses(command TEXT PRIMARY KEY, response TEXT NOT NULL)"""
+        async with self.responses_database.acquire() as connection:
+            await connection.execute(query)
+
     async def event_ready(self) -> None:
         LOGGER.info("Successfully logged in as: %s", self.bot_id)
 
@@ -109,13 +153,37 @@ class MyComponent(commands.Component):
         """
         await ctx.send("https://bsky.app/profile/tcurls.net")
 
+    @commands.is_elevated()
+    @commands.command()
+    async def addcommand(self, ctx: commands.Context, *, content: str ) -> None:
+        # Split content of message after command, should be one word command followed by response
+        content_array = content.split(' ', 1)
+        command = content_array[0]
+        response = content_array[1]
+        try:
+            await self.bot.add_response(command, response)
+        except Exception as e:
+            LOGGER.warning(e)
+            await ctx.send("Failed to add command! :(")
+
+    # @commands.is_elevated()
+    # @commands.command()
+    # async def rmcommand(self, ctx: commands.Context) -> None:
+    #     async with self.remove_response(rows[""])
+    #         await ctx.send("Command removed successfully!")
+    
+    # @commands.command()
+    # async def whatis(self, ctx: commands.Context, *, content:str) -> None:
+    #     async with self.get_response(content)
+    #         await ctx.send("Command removed successfully!")
 
 def main() -> None:
     twitchio.utils.setup_logging(level=logging.INFO)
 
     async def runner() -> None:
-        async with asqlite.create_pool("tokens.db") as tdb, Bot(token_database=tdb) as bot:
+        async with asqlite.create_pool("tokens.db") as tdb, asqlite.create_pool("responses.db") as rdb, Bot(token_database=tdb, responses_database=rdb) as bot:
             await bot.setup_database()
+            await bot.setup_responses_database()
             await bot.start()
 
     try:
